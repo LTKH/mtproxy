@@ -394,30 +394,21 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
     size := float64(len(data))
 
     // Checking the size limit
-    if (item.Avg+size) > 10000000 {
-        sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
-        if api.Upstream.ErrorCode != 0 {
-            w.WriteHeader(api.Upstream.ErrorCode)
-            return
+    for _, sizeLimit := range api.Upstream.SizeLimit {
+        if !sizeLimit.RE.MatchString(key){
+            continue
         }
-        w.WriteHeader(413)
-        return
 
-    //if api.Upstream.SizeLimit > 0 && api.Objects.GetTotal() > api.Upstream.SizeLimit {
-    //    item := api.Objects.Get(key)
-    //    count := float64(len(api.Objects.items))
-    //    if count > 0 && item.Avg > api.Upstream.SizeLimit / count {
-    //        sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
-    //        requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "413"}).Inc()
-    //        if api.Upstream.ErrorCode != 0 {
-    //            w.WriteHeader(api.Upstream.ErrorCode)
-    //            return
-    //        }
-    //        w.WriteHeader(413)
-    //        return
-    //    }
+        if (item.Avg+size) > 10000000 {
+            sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
+            //if api.Upstream.ErrorCode != 0 {
+            //    w.WriteHeader(api.Upstream.ErrorCode)
+            //    return
+            //}
+            //w.WriteHeader(413)
+            //return
+        }
     }
-
     
     api.Objects.Set(key, r.URL.Path, size)
 

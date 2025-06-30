@@ -10,7 +10,9 @@ http_client:
 
 upstreams: 
   - listen_addr: "127.0.0.1:8888"
-    size_limit: 3000000
+    size_limit:
+      - object: ".*"
+        bytes: 10000
     url_map:
       - src_paths:
           - ".*"
@@ -20,7 +22,6 @@ upstreams:
         #error_code: 204
 
   #- listen_addr: "127.0.0.1:8888"
-  #  #size_limit: 60000
   #  #update_stat: 10s
   #  url_map:
   #    - src_paths:
