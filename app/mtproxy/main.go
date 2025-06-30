@@ -408,6 +408,8 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
             //w.WriteHeader(413)
             //return
         }
+
+        break
     }
     
     api.Objects.Set(key, r.URL.Path, size)
