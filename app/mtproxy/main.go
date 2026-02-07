@@ -18,6 +18,7 @@ import (
     "sync"
     //"math"
     //"strings"
+	"slices"
     "regexp"
     "bytes"
     "crypto/sha1"
@@ -130,13 +131,14 @@ func sumValues(values []TimeValue) (float64, []TimeValue) {
     return sum, arr
 }
 
-func (o *Objects) Get(key string) *Object {
+func (o *Objects) Get(key string, size float64) *Object {
     o.RLock()
     defer o.RUnlock()
 
     item, ok := o.items[key]
     if ok {
-        return item
+        sum, arr := sumValues(append(item.Arr, TimeValue{Timestamp: time.Now().UnixNano(), Value: size}))
+        return &Object{Arr: arr, Avg: float64(sum/60), UrlPath: item.UrlPath}
     }
     
     return &Object{}
@@ -148,8 +150,7 @@ func (o *Objects) Set(key, path string, size float64) *Object {
 
     item, ok := o.items[key]
     if ok {
-        sum, arr := sumValues(append(item.Arr, TimeValue{Timestamp: time.Now().UnixNano(), Value: size}))
-        o.items[key] = &Object{Arr: arr, Avg: float64(sum/60), UrlPath: path}
+        o.items[key] = &Object{Arr: append(item.Arr, TimeValue{Timestamp: time.Now().UnixNano(), Value: size}), Avg: item.Avg, UrlPath: item.UrlPath}
     } else {
         o.items[key] = &Object{Arr: append([]TimeValue{}, TimeValue{Timestamp: time.Now().UnixNano(), Value: size}), Avg: float64(0), UrlPath: path}
     }
@@ -233,14 +234,14 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
 
     go func(api *API){
         if api.Upstream.UpdateStat == 0 {
-            api.Upstream.UpdateStat = 10 * time.Second
+            api.Upstream.UpdateStat = 60 * time.Second
         }
 
         for {
             for _, key := range api.Objects.Items() {
                 item := api.Objects.Update(key)
                 sizeBytesBucket.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": item.UrlPath, "object": key}).Set(item.Avg)
-                //log.Printf("[debug] %v - %v", key, int(item.Avg))
+                log.Printf("[debug] %v - %v", key, int(item.Avg))
             }
             time.Sleep(api.Upstream.UpdateStat)
         }
@@ -255,27 +256,40 @@ func getStringHash(text string) string {
     return hex.EncodeToString(h.Sum(nil))
 }
 
-func getPrefixURL(prefix []*config.URLPrefix) *config.URLPrefix {
-    var urlPrefix *config.URLPrefix
-
-    if len(prefix) == 0 {
-        return urlPrefix
-    }
-    
-    requests := 1000000
-
-    for _, up := range prefix {
-        if len(up.Health) != 0 {
-            continue
-        }
-
-        if len(up.Requests) < requests {
-            requests = len(up.Requests)
-            urlPrefix = up
-        }
+func getPrefixURL(prefixes []*config.URLPrefix) *config.URLPrefix {
+    if len(prefixes) == 0 {
+        return &config.URLPrefix{}
     }
 
-    return urlPrefix
+	prefixes = slices.DeleteFunc(prefixes, func(p *config.URLPrefix) bool {
+		return len(p.Health) > 0
+	})
+
+	slices.SortFunc(prefixes, func(a, b *config.URLPrefix) int {
+        // Сравниваем длину очереди в канале Requests
+		if len(a.Requests) < len(b.Requests) {
+			return -1
+		}
+		if len(a.Requests) > len(b.Requests) {
+			return 1
+		}
+
+		// Сравниваем Latency
+		if a.Latency < b.Latency {
+			return -1
+		}
+		if a.Latency > b.Latency {
+			return 1
+		}
+
+		return 0
+	})
+
+	if len(prefixes) > 0 {
+		return prefixes[0]
+	}
+
+    return &config.URLPrefix{}
 }
 
 func readData(r *http.Request) (map[string][]string, []byte, error) {
@@ -304,27 +318,31 @@ func readData(r *http.Request) (map[string][]string, []byte, error) {
     return r.Header, data, nil
 }
 
-func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte, map[string][]string, int, error) {
+func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte, map[string][]string, int, time.Duration, error) {
     req, err := http.NewRequest(r.Method, url, data)
     if err != nil {
-        return nil, nil, 400, err
+        return nil, nil, 400, 0, err
     }
 
     req.Header = r.Header
     req.URL.RawQuery = r.URL.RawQuery
 
+	start := time.Now()
+
     resp, err := api.Client.Do(req)
     if err != nil {
-        return nil, nil, 503, err
+        return nil, nil, 503, 0, err
     }
     defer resp.Body.Close()
 
+	duration := time.Since(start)
+
     body, err := io.ReadAll(resp.Body)
     if err != nil {
-        return nil, nil, 400, err
+        return nil, nil, 400, duration, err
     }
 
-    return body, resp.Header, resp.StatusCode, nil
+    return body, resp.Header, resp.StatusCode, duration, nil
 }
 
 func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPrefix *config.URLPrefix, username string, data []byte) ([]byte, map[string][]string, int, error) {
@@ -332,7 +350,7 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
         urlPrefix.Requests <- 1
     }
 
-    body, header, code, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, bytes.NewReader(data))
+    body, header, code, _, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, bytes.NewReader(data))
     if err != nil {
         if len(urlPrefix.Requests) > 0 {
             <- urlPrefix.Requests
@@ -377,7 +395,7 @@ func (api *API) HealthCheck(w http.ResponseWriter, r *http.Request){
 
 func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
     username, password, auth := r.BasicAuth()
-
+	
     // Get request body
     header, data, err := readData(r)
     if err != nil {
@@ -390,8 +408,11 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
 
     // Get a limit for an object
     key := getObject(r, api.Upstream.ObjectHeader)
-    item := api.Objects.Get(key)
     size := float64(len(data))
+    item := api.Objects.Get(key, size)
+
+    api.Objects.Set(key, r.URL.Path, size)
+	sizeBytesTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
 
     // Checking the size limit
     for _, sizeLimit := range api.Upstream.SizeLimit {
@@ -399,20 +420,15 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
             continue
         }
 
-        if (item.Avg+size) > 10000000 {
+        if item.Avg > sizeLimit.Bytes {
+            requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "413"}).Inc()
             sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
-            //if api.Upstream.ErrorCode != 0 {
-            //    w.WriteHeader(api.Upstream.ErrorCode)
-            //    return
-            //}
-            //w.WriteHeader(413)
-            //return
+            w.WriteHeader(413)
+            return
         }
 
         break
     }
-    
-    api.Objects.Set(key, r.URL.Path, size)
 
     // Path matching check
     for _, mapPath := range api.Upstream.MapPaths {
@@ -441,6 +457,7 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
             if urlPrefix := getPrefixURL(api.Upstream.URLMap[mapPath.Index].URLPrefix); urlPrefix != nil {
 
                 if api.Upstream.URLMap[mapPath.Index].RequestsLimit > 0 && len(urlPrefix.Requests) > api.Upstream.URLMap[mapPath.Index].RequestsLimit {
+					//sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": strconv.Itoa(429)}).Inc()
                     
                     if api.Upstream.URLMap[mapPath.Index].ErrorCode != 0 {
@@ -529,17 +546,19 @@ func main() {
                                 Method: "GET",
                                 URL: &url.URL{RawQuery: ""},
                             }
-                            _, _, code, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, nil)
+                            _, _, code, latency, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, nil)
                             if err != nil || code >= 300 {
                                 if len(urlPrefix.Health) < 5 {
                                     urlPrefix.Health <- 1
                                 }
-                                log.Printf("[warn] \"GET %v\" %v", urlPrefix.URL+urlMap.HealthCheck, code)
+                                log.Printf("[warn] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
                             } else {
                                 if len(urlPrefix.Health) > 0 {
                                     <- urlPrefix.Health
                                 }
+								//log.Printf("[info] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
                             }
+							urlPrefix.Latency = latency
                             healthCheckFailed.With(prometheus.Labels{"target_url": urlPrefix.URL+urlMap.HealthCheck}).Set(float64(len(urlPrefix.Health)))
                             upstreamRequests.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Requests)))
                             time.Sleep(1 * time.Second)

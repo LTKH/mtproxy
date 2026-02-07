@@ -68,9 +68,9 @@ type URLMap struct {
 
 // URLPrefix represents passed `url_prefix`
 type URLPrefix struct {
-    //Check                  bool
     Requests               chan int
     Health                 chan int
+    Latency                time.Duration
     URL                    string
 }
 

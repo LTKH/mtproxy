@@ -12,13 +12,14 @@ upstreams:
   - listen_addr: "127.0.0.1:8888"
     size_limit:
       - object: ".*"
-        bytes: 10000
+        bytes: 10000000
     url_map:
       - src_paths:
           - ".*"
         url_prefix:
           - "http://127.0.0.1:8428"
-        #health_check: "/health"
+          - "http://127.0.0.1:8429"
+        health_check: "/health"
         #error_code: 204
 
   #- listen_addr: "127.0.0.1:8888"
