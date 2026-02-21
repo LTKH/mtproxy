@@ -17,8 +17,10 @@ import (
     "flag"
     "sync"
     //"math"
+    "math/rand"
     //"strings"
-	"slices"
+    "sort"
+    //"slices"
     "regexp"
     "bytes"
     "crypto/sha1"
@@ -62,6 +64,13 @@ var (
     healthCheckFailed = prometheus.NewGaugeVec(
         prometheus.GaugeOpts{
             Name: "mtproxy_health_check_failed",
+            Help: "",
+        },
+        []string{"target_url"},
+    )
+    healthCheckLatency = prometheus.NewGaugeVec(
+        prometheus.GaugeOpts{
+            Name: "mtproxy_health_check_latency",
             Help: "",
         },
         []string{"target_url"},
@@ -241,7 +250,7 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
             for _, key := range api.Objects.Items() {
                 item := api.Objects.Update(key)
                 sizeBytesBucket.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": item.UrlPath, "object": key}).Set(item.Avg)
-                log.Printf("[debug] %v - %v", key, int(item.Avg))
+                //log.Printf("[debug] %v - %v", key, int(item.Avg))
             }
             time.Sleep(api.Upstream.UpdateStat)
         }
@@ -256,40 +265,30 @@ func getStringHash(text string) string {
     return hex.EncodeToString(h.Sum(nil))
 }
 
-func getPrefixURL(prefixes []*config.URLPrefix) *config.URLPrefix {
+func getPrefixURLs(prefixes []*config.URLPrefix) []*config.URLPrefix {
+    var results []*config.URLPrefix
+
     if len(prefixes) == 0 {
-        return &config.URLPrefix{}
+        return results
     }
 
-	prefixes = slices.DeleteFunc(prefixes, func(p *config.URLPrefix) bool {
-		return len(p.Health) > 0
-	})
+    for _, p := range prefixes {
+        if len(p.Health) == 0 {
+            results = append(results, p)
+        }
+    }
 
-	slices.SortFunc(prefixes, func(a, b *config.URLPrefix) int {
-        // Сравниваем длину очереди в канале Requests
-		if len(a.Requests) < len(b.Requests) {
-			return -1
-		}
-		if len(a.Requests) > len(b.Requests) {
-			return 1
-		}
+    sort.Slice(results, func(i, j int) bool {
+        // 1. Если задержки не равны — сортируем по задержке
+        if results[i].Latency.Milliseconds() != results[j].Latency.Milliseconds() {
+            return results[i].Latency.Milliseconds() < results[j].Latency.Milliseconds()
+        }
+        
+        // 2. Если задержки равны — подбрасываем монетку (50/50)
+        return rand.Intn(2) == 0
+    })
 
-		// Сравниваем Latency
-		if a.Latency < b.Latency {
-			return -1
-		}
-		if a.Latency > b.Latency {
-			return 1
-		}
-
-		return 0
-	})
-
-	if len(prefixes) > 0 {
-		return prefixes[0]
-	}
-
-    return &config.URLPrefix{}
+    return results
 }
 
 func readData(r *http.Request) (map[string][]string, []byte, error) {
@@ -327,7 +326,7 @@ func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte,
     req.Header = r.Header
     req.URL.RawQuery = r.URL.RawQuery
 
-	start := time.Now()
+    start := time.Now()
 
     resp, err := api.Client.Do(req)
     if err != nil {
@@ -335,7 +334,7 @@ func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte,
     }
     defer resp.Body.Close()
 
-	duration := time.Since(start)
+    duration := time.Since(start)
 
     body, err := io.ReadAll(resp.Body)
     if err != nil {
@@ -395,7 +394,7 @@ func (api *API) HealthCheck(w http.ResponseWriter, r *http.Request){
 
 func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
     username, password, auth := r.BasicAuth()
-	
+    
     // Get request body
     header, data, err := readData(r)
     if err != nil {
@@ -412,7 +411,7 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
     item := api.Objects.Get(key, size)
 
     api.Objects.Set(key, r.URL.Path, size)
-	sizeBytesTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
+    sizeBytesTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
 
     // Checking the size limit
     for _, sizeLimit := range api.Upstream.SizeLimit {
@@ -454,10 +453,18 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                 }
             }
 
-            if urlPrefix := getPrefixURL(api.Upstream.URLMap[mapPath.Index].URLPrefix); urlPrefix != nil {
+            prefixURLs := getPrefixURLs(api.Upstream.URLMap[mapPath.Index].URLPrefix)
+            for i, urlPrefix := range prefixURLs {
+
+                //log.Printf("[debug] requests - %v, latency - %v, URL - %v", len(urlPrefix.Requests), urlPrefix.Latency.Milliseconds(), urlPrefix.URL)
 
                 if api.Upstream.URLMap[mapPath.Index].RequestsLimit > 0 && len(urlPrefix.Requests) > api.Upstream.URLMap[mapPath.Index].RequestsLimit {
-					//sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
+                    // Пропустить, если есть еще элементы массива
+                    if i+1 < len(prefixURLs) {
+                        continue
+                    }
+
+                    //sizeBytesDropped.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": r.URL.Path, "object": key}).Add(size)
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": strconv.Itoa(429)}).Inc()
                     
                     if api.Upstream.URLMap[mapPath.Index].ErrorCode != 0 {
@@ -477,6 +484,12 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                 body, header, code, err := api.NewProxyRequest(r, mapPath, urlPrefix, username, data)
                 if err != nil {
                     log.Printf("[error] %v - %s", err, r.URL.Path)
+                    
+                    // Пропустить, если есть еще элементы массива
+                    if i+1 < len(prefixURLs) {
+                        continue
+                    }
+
                     w.WriteHeader(code)
                     return
                 }
@@ -491,6 +504,7 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                         }
                     }
                 }
+                
                 w.WriteHeader(code)
                 w.Write(body)
                 return
@@ -556,10 +570,11 @@ func main() {
                                 if len(urlPrefix.Health) > 0 {
                                     <- urlPrefix.Health
                                 }
-								//log.Printf("[info] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
+                                //log.Printf("[info] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
                             }
-							urlPrefix.Latency = latency
-                            healthCheckFailed.With(prometheus.Labels{"target_url": urlPrefix.URL+urlMap.HealthCheck}).Set(float64(len(urlPrefix.Health)))
+                            urlPrefix.Latency = latency
+                            healthCheckFailed.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Health)))
+                            healthCheckLatency.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(urlPrefix.Latency.Milliseconds()))
                             upstreamRequests.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Requests)))
                             time.Sleep(1 * time.Second)
                         }
@@ -588,6 +603,7 @@ func main() {
         prometheus.MustRegister(sizeBytesDropped)
         prometheus.MustRegister(sizeBytesBucket)
         prometheus.MustRegister(healthCheckFailed)
+        prometheus.MustRegister(healthCheckLatency)
         prometheus.MustRegister(upstreamRequests)
 
         mux := http.NewServeMux()
