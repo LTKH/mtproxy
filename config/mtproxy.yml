@@ -18,7 +18,7 @@ upstreams:
           - ".*"
         url_prefix:
           - "http://127.0.0.1:8428"
-          - "http://127.0.0.1:8429"
+          #- "http://127.0.0.1:8429"
         health_check: "/health"
         #error_code: 204
 

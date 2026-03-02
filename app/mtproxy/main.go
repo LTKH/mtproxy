@@ -4,7 +4,7 @@ import (
     "io"
     "io/ioutil"
     "strconv"
-    "net"
+    //"net"
     //"net/rpc"
     "net/url"
     "net/http"
@@ -23,8 +23,11 @@ import (
     //"slices"
     "regexp"
     "bytes"
-    "crypto/sha1"
-    "encoding/hex"
+    //"crypto/sha1"
+    "crypto/aes"
+    "crypto/cipher"
+    //"encoding/hex"
+    "encoding/base64"
     "compress/gzip"
 
     "github.com/ltkh/mtproxy/internal/config"
@@ -83,6 +86,7 @@ var (
         []string{"target_url"},
     )
     ipRegexp, _ = regexp.Compile("^(.*):[0-9]+$")
+    KeyString = "jtrses0-cxaw86djak34:sa8"
 )
 
 type API struct {
@@ -90,7 +94,7 @@ type API struct {
     //Peers        *config.Peers
     //Limits       *Limits
     Objects      *Objects
-    Client       *http.Client
+    //Client       *http.Client
     Debug        bool
 }
 
@@ -108,6 +112,19 @@ type Object struct {
 type TimeValue struct {
     Timestamp    int64
     Value        float64
+}
+
+func encrypt(text, key string) (string, error) {
+    block, err := aes.NewCipher([]byte(key))
+    if err != nil {
+        return "", err
+    }
+    plainText := []byte(text)
+    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
+    cfb := cipher.NewCFBEncrypter(block, bytes)
+    cipherText := make([]byte, len(plainText))
+    cfb.XORKeyStream(cipherText, plainText)
+    return base64.StdEncoding.EncodeToString(cipherText), nil
 }
 
 func getObject(r *http.Request, header string) string {
@@ -225,19 +242,6 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
     api := &API{ 
         Upstream: u,
         Objects: &Objects{items: make(map[string]*Object)},
-        Client: &http.Client{
-            Timeout: c.Timeout,
-            Transport: &http.Transport{
-                MaxIdleConnsPerHost: c.HttpTransport.MaxIdleConnsPerHost,
-                DialContext: (&net.Dialer{
-                    Timeout:   c.HttpTransport.DialContext.Timeout,
-                    KeepAlive: c.HttpTransport.DialContext.KeepAlive,
-                }).DialContext,
-                ExpectContinueTimeout: c.HttpTransport.ExpectContinueTimeout,
-                TLSHandshakeTimeout:   c.HttpTransport.TLSHandshakeTimeout,
-                ResponseHeaderTimeout: c.HttpTransport.ResponseHeaderTimeout,
-            },
-        },
         Debug: d,
     }
 
@@ -257,12 +261,6 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
     }(api)
     
     return api, nil
-}
-
-func getStringHash(text string) string {
-    h := sha1.New()
-    io.WriteString(h, text)
-    return hex.EncodeToString(h.Sum(nil))
 }
 
 func getPrefixURLs(prefixes []*config.URLPrefix) []*config.URLPrefix {
@@ -317,7 +315,7 @@ func readData(r *http.Request) (map[string][]string, []byte, error) {
     return r.Header, data, nil
 }
 
-func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte, map[string][]string, int, time.Duration, error) {
+func (api *API) NewRequest(r *http.Request, url string, userInfo config.UserInfo, client *http.Client, data io.Reader) ([]byte, map[string][]string, int, time.Duration, error) {
     req, err := http.NewRequest(r.Method, url, data)
     if err != nil {
         return nil, nil, 400, 0, err
@@ -326,9 +324,14 @@ func (api *API) NewRequest(r *http.Request, url string, data io.Reader) ([]byte,
     req.Header = r.Header
     req.URL.RawQuery = r.URL.RawQuery
 
+    // 4. Добавляем логин и пароль (Basic Auth)
+    if userInfo.Username != "" {
+        req.SetBasicAuth(userInfo.Username, userInfo.Password)
+    }
+
     start := time.Now()
 
-    resp, err := api.Client.Do(req)
+    resp, err := client.Do(req)
     if err != nil {
         return nil, nil, 503, 0, err
     }
@@ -349,7 +352,14 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
         urlPrefix.Requests <- 1
     }
 
-    body, header, code, _, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, bytes.NewReader(data))
+    userInfo := config.UserInfo{
+        Username: api.Upstream.URLMap[mapPath.Index].Username,
+        Password: api.Upstream.URLMap[mapPath.Index].Password,
+    }
+
+	client := api.Upstream.URLMap[mapPath.Index].Client
+
+    body, header, code, _, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, userInfo, client, bytes.NewReader(data))
     if err != nil {
         if len(urlPrefix.Requests) > 0 {
             <- urlPrefix.Requests
@@ -446,7 +456,14 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                     w.WriteHeader(403)
                     return
                 }
-                if getStringHash(password) != mPassword {
+                encryptPass, err := encrypt(password, KeyString)
+                if err != nil {
+                    log.Printf("[error] %v - %s", err, r.URL.Path)
+                    requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "500"}).Inc()
+                    w.WriteHeader(500)
+                    return
+                }
+                if encryptPass != mPassword {
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "403"}).Inc()
                     w.WriteHeader(403)
                     return
@@ -526,16 +543,22 @@ func main() {
     lsAddress      := flag.String("listen.client-address", "127.0.0.1:8426", "listen address")
     cfFile         := flag.String("config.file", "config/mtproxy.yml", "config file")
     encryptPass    := flag.String("encrypt", "", "encrypt password")
+    decryptPass    := flag.Bool("decrypt", true, "decrypt password string")
     debug          := flag.Bool("debug", false, "debug mode")
     flag.Parse()
 
+    // Encrypt
     if *encryptPass != "" {
-        log.Printf("[pass] %s", getStringHash(*encryptPass))
+        passwd, err := encrypt(*encryptPass, KeyString)
+        if err != nil {
+            log.Fatalf("[error] %v", err)
+        }
+        log.Printf("[pass] %s", passwd)
         return
     }
 
     // Loading configuration file
-    cfg, err := config.NewConfig(*cfFile)
+    cfg, err := config.NewConfig(*cfFile, KeyString, *decryptPass)
     if err != nil {
         log.Fatalf("[error] %v", err)
     }
@@ -560,7 +583,11 @@ func main() {
                                 Method: "GET",
                                 URL: &url.URL{RawQuery: ""},
                             }
-                            _, _, code, latency, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, nil)
+                            userInfo := config.UserInfo{
+                                Username: urlMap.Username,
+                                Password: urlMap.Password,
+                            }
+                            _, _, code, latency, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, userInfo, urlMap.Client, nil)
                             if err != nil || code >= 300 {
                                 if len(urlPrefix.Health) < 5 {
                                     urlPrefix.Health <- 1
@@ -570,7 +597,6 @@ func main() {
                                 if len(urlPrefix.Health) > 0 {
                                     <- urlPrefix.Health
                                 }
-                                //log.Printf("[info] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
                             }
                             urlPrefix.Latency = latency
                             healthCheckFailed.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Health)))

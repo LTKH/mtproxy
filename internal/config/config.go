@@ -2,16 +2,24 @@ package config
 
 import (
     //"io"
+    "os"
     "fmt"
     //"path"
     //"errors"
     "regexp"
     //"strings"
     //"strconv"
+    "net"
     //"net/url"
+    "net/http"
     "io/ioutil"
     "gopkg.in/yaml.v2"
     "time"
+    "crypto/aes"
+    "crypto/tls"
+    "crypto/x509"
+    "crypto/cipher"
+    "encoding/base64"
     //"net/http"
     //"log"
     //"github.com/ltkh/montools/internal/monitor"
@@ -64,6 +72,12 @@ type URLMap struct {
     ErrorCode              int                     `yaml:"error_code"`
     RequestsLimit          int                     `yaml:"requests_limit"`
     IgnoreAnswer           bool                    `yaml:"ignore_answer"`
+    Username               string                  `yaml:"username"`
+    Password               string                  `yaml:"password"`
+    tlsCAFile              string                  `yaml:"tls_ca"`
+    tlsCertFile            string                  `yaml:"tls_cert"`
+    tlsKeyFile             string                  `yaml:"tls_key"`
+    Client                 *http.Client            `yaml:"-"`
 }
 
 // URLPrefix represents passed `url_prefix`
@@ -89,8 +103,24 @@ type SizeLimit struct {
 
 // UserInfo is user information
 type UserInfo struct {
-    Username              string                  `yaml:"username"`
-    Password              string                  `yaml:"password"`
+    Username               string                  `yaml:"username"`
+    Password               string                  `yaml:"password"`
+}
+
+func decrypt(text, key string) (string, error) {
+    block, err := aes.NewCipher([]byte(key))
+    if err != nil {
+        return "", err
+    }
+    cipherText, err := base64.StdEncoding.DecodeString(text)
+    if err != nil {
+        return "", err
+    }
+    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
+    cfb := cipher.NewCFBDecrypter(block, bytes)
+    plainText := make([]byte, len(cipherText))
+    cfb.XORKeyStream(plainText, cipherText)
+    return string(plainText), nil
 }
 
 // UnmarshalYAML unmarshals up from yaml.
@@ -106,7 +136,7 @@ func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     return nil
 }
 
-func NewConfig(filename string) (*Config, error) {
+func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
     cfg := &Config{}
 
@@ -124,6 +154,14 @@ func NewConfig(filename string) (*Config, error) {
             stream.ObjectHeader = "X-Custom-Object"
         }
         for i, urlMap := range stream.URLMap {
+            if urlMap.Password != "" && encrypted {
+                ps, err := decrypt(urlMap.Password, key)
+                if err != nil {
+                    return cfg, err
+                }
+                urlMap.Password = ps
+            }
+
             for _, srcPaths := range urlMap.SrcPaths {
                 var mp SrcPath
                 mp.sOriginal = srcPaths
@@ -137,11 +175,48 @@ func NewConfig(filename string) (*Config, error) {
 
                 stream.MapPaths = append(stream.MapPaths, mp)
             }
+
             mu := make(map[string]string)
             for _, user := range urlMap.Users {
                 mu[user.Username] = user.Password
             }
             urlMap.MapUsers = mu
+
+            tlsConfig := &tls.Config{InsecureSkipVerify: true}
+
+            // 1. Загружаем корневой сертификат (CA) для проверки сервера
+            if urlMap.tlsCAFile != "" {
+                caCert, _ := os.ReadFile(urlMap.tlsCAFile)
+                caCertPool := x509.NewCertPool()
+                caCertPool.AppendCertsFromPEM(caCert)
+
+                tlsConfig.RootCAs = caCertPool
+            }
+
+            // 2. Загружаем пару сертификат + ключ клиента для авторизации на сервере
+            if urlMap.tlsCertFile != "" && urlMap.tlsKeyFile != "" {
+                clientCert, err := tls.LoadX509KeyPair(urlMap.tlsCertFile, urlMap.tlsKeyFile)
+                if err != nil {
+                    return cfg, err
+                }
+                tlsConfig.Certificates = []tls.Certificate{clientCert}
+                tlsConfig.InsecureSkipVerify = false
+            }
+
+            urlMap.Client = &http.Client{
+                Timeout: cfg.HttpClient.Timeout,
+                Transport: &http.Transport{
+                    MaxIdleConnsPerHost: cfg.HttpClient.HttpTransport.MaxIdleConnsPerHost,
+                    DialContext: (&net.Dialer{
+                        Timeout:   cfg.HttpClient.HttpTransport.DialContext.Timeout,
+                        KeepAlive: cfg.HttpClient.HttpTransport.DialContext.KeepAlive,
+                    }).DialContext,
+                    ExpectContinueTimeout: cfg.HttpClient.HttpTransport.ExpectContinueTimeout,
+                    TLSHandshakeTimeout:   cfg.HttpClient.HttpTransport.TLSHandshakeTimeout,
+                    ResponseHeaderTimeout: cfg.HttpClient.HttpTransport.ResponseHeaderTimeout,
+                    TLSClientConfig: tlsConfig,
+                },
+            }
         }
         for s, sizeLimit := range stream.SizeLimit {
             re, err := regexp.Compile("^(?:" + sizeLimit.Object + ")$")
