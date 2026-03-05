@@ -55,8 +55,8 @@ type Upstream struct {
     //SizeLimit              float64                 `yaml:"size_limit"`
     UpdateStat             time.Duration           `yaml:"update_stat"`
     ErrorCode              int                     `yaml:"error_code"`
-    CertFile               string                  `yaml:"cert_file"`
-    CertKey                string                  `yaml:"cert_key"`
+    CertFile               string                  `yaml:"tls_cert"`
+    KeyFile                string                  `yaml:"tls_key"`
     URLMap                 []*URLMap               `yaml:"url_map"`
     MapPaths               []SrcPath               `yaml:"-"`
     SizeLimit              []SizeLimit             `yaml:"size_limit"`
@@ -72,12 +72,8 @@ type URLMap struct {
     ErrorCode              int                     `yaml:"error_code"`
     RequestsLimit          int                     `yaml:"requests_limit"`
     IgnoreAnswer           bool                    `yaml:"ignore_answer"`
-    Username               string                  `yaml:"username"`
-    Password               string                  `yaml:"password"`
-    tlsCAFile              string                  `yaml:"tls_ca"`
-    tlsCertFile            string                  `yaml:"tls_cert"`
-    tlsKeyFile             string                  `yaml:"tls_key"`
     Client                 *http.Client            `yaml:"-"`
+    ClientSettings         ClientSettings          `yaml:"client"`
 }
 
 // URLPrefix represents passed `url_prefix`
@@ -105,6 +101,16 @@ type SizeLimit struct {
 type UserInfo struct {
     Username               string                  `yaml:"username"`
     Password               string                  `yaml:"password"`
+}
+
+// ClientSettings
+type ClientSettings struct {
+    Username               string                  `yaml:"username"`
+    Password               string                  `yaml:"password"`
+    //tlsSkipVerify          bool                    `yaml:"tls_skip_verify"`
+    tlsCAFile              string                  `yaml:"tls_ca"`
+    tlsCertFile            string                  `yaml:"tls_cert"`
+    tlsKeyFile             string                  `yaml:"tls_key"`
 }
 
 func decrypt(text, key string) (string, error) {
@@ -154,12 +160,12 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
             stream.ObjectHeader = "X-Custom-Object"
         }
         for i, urlMap := range stream.URLMap {
-            if urlMap.Password != "" && encrypted {
-                ps, err := decrypt(urlMap.Password, key)
+            if urlMap.ClientSettings.Password != "" && encrypted {
+                ps, err := decrypt(urlMap.ClientSettings.Password, key)
                 if err != nil {
                     return cfg, err
                 }
-                urlMap.Password = ps
+                urlMap.ClientSettings.Password = ps
             }
 
             for _, srcPaths := range urlMap.SrcPaths {
@@ -185,8 +191,8 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
             tlsConfig := &tls.Config{InsecureSkipVerify: true}
 
             // 1. Загружаем корневой сертификат (CA) для проверки сервера
-            if urlMap.tlsCAFile != "" {
-                caCert, _ := os.ReadFile(urlMap.tlsCAFile)
+            if urlMap.ClientSettings.tlsCAFile != "" {
+                caCert, _ := os.ReadFile(urlMap.ClientSettings.tlsCAFile)
                 caCertPool := x509.NewCertPool()
                 caCertPool.AppendCertsFromPEM(caCert)
 
@@ -194,8 +200,8 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
             }
 
             // 2. Загружаем пару сертификат + ключ клиента для авторизации на сервере
-            if urlMap.tlsCertFile != "" && urlMap.tlsKeyFile != "" {
-                clientCert, err := tls.LoadX509KeyPair(urlMap.tlsCertFile, urlMap.tlsKeyFile)
+            if urlMap.ClientSettings.tlsCertFile != "" && urlMap.ClientSettings.tlsKeyFile != "" {
+                clientCert, err := tls.LoadX509KeyPair(urlMap.ClientSettings.tlsCertFile, urlMap.ClientSettings.tlsKeyFile)
                 if err != nil {
                     return cfg, err
                 }

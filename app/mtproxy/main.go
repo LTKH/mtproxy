@@ -4,6 +4,7 @@ import (
     "io"
     "io/ioutil"
     "strconv"
+    //"maps"
     //"net"
     //"net/rpc"
     "net/url"
@@ -321,13 +322,19 @@ func (api *API) NewRequest(r *http.Request, url string, userInfo config.UserInfo
         return nil, nil, 400, 0, err
     }
 
-    req.Header = r.Header
-    req.URL.RawQuery = r.URL.RawQuery
+    for key, value := range r.Header{
+        if key != "Authorization" {
+            req.Header.Set(key, value[0])
+        }
+    }
 
     // 4. Добавляем логин и пароль (Basic Auth)
-    if userInfo.Username != "" {
+    if userInfo.Username != "" && userInfo.Password != "" {
         req.SetBasicAuth(userInfo.Username, userInfo.Password)
     }
+    //log.Printf("[info] authorization: %v", req.Header.Get("Authorization"))
+
+    req.URL.RawQuery = r.URL.RawQuery
 
     start := time.Now()
 
@@ -353,11 +360,11 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
     }
 
     userInfo := config.UserInfo{
-        Username: api.Upstream.URLMap[mapPath.Index].Username,
-        Password: api.Upstream.URLMap[mapPath.Index].Password,
+        Username: api.Upstream.URLMap[mapPath.Index].ClientSettings.Username,
+        Password: api.Upstream.URLMap[mapPath.Index].ClientSettings.Password,
     }
 
-	client := api.Upstream.URLMap[mapPath.Index].Client
+    client := api.Upstream.URLMap[mapPath.Index].Client
 
     body, header, code, _, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, userInfo, client, bytes.NewReader(data))
     if err != nil {
@@ -378,8 +385,8 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
     }
 
     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": strconv.Itoa(code)}).Inc()
-    if code >= 400 && code < 500 {
-        log.Printf("[warn] %v", string(body))
+    if code >= 400 && string(body) != "" {
+        log.Printf("[warn] body: %v", string(body))
     }
 
     return body, header, code, err
@@ -584,8 +591,8 @@ func main() {
                                 URL: &url.URL{RawQuery: ""},
                             }
                             userInfo := config.UserInfo{
-                                Username: urlMap.Username,
-                                Password: urlMap.Password,
+                                Username: urlMap.ClientSettings.Username,
+                                Password: urlMap.ClientSettings.Password,
                             }
                             _, _, code, latency, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, userInfo, urlMap.Client, nil)
                             if err != nil || code >= 300 {
@@ -611,8 +618,8 @@ func main() {
 
         go func(stream *config.Upstream) {
             log.Printf("[info] upstream address: %v", stream.ListenAddr)
-            if stream.CertFile != "" && stream.CertKey != "" {
-                if err := http.ListenAndServeTLS(stream.ListenAddr, stream.CertFile, stream.CertKey, mux); err != nil {
+            if stream.CertFile != "" && stream.KeyFile != "" {
+                if err := http.ListenAndServeTLS(stream.ListenAddr, stream.CertFile, stream.KeyFile, mux); err != nil {
                     log.Fatalf("[error] %v", err)
                 }
             } else {
