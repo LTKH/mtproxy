@@ -5,16 +5,19 @@ import (
     "io"
     "os"
     "log"
-    "crypto/aes"
-    "crypto/cipher"
+    //"crypto/aes"
+    //"crypto/cipher"
     //"crypto/rand"
     "crypto/sha256"
-    "encoding/base64"
+    //"encoding/base64"
     "runtime"
     "bytes"
-    "flag"
+    //"flag"
     "golang.org/x/sys/unix"
     "github.com/joho/godotenv"
+    "github.com/spf13/pflag"
+    //"github.com/99designs/keyring"
+    "github.com/ltkh/mtproxy/internal/cryptor"
 )
 
 func getParentExePath() (string, error) {
@@ -26,14 +29,14 @@ func getParentExePath() (string, error) {
         return os.Readlink(fmt.Sprintf("/proc/%d/exe", ppid))
 
     case "darwin": // macOS
-        // KERN_PROCARGS2 возвращает путь к исполняемому файлу и аргументы
+        // Возвращает путь к исполняемому файлу и аргументы
         data, err := unix.SysctlRaw("kern.procargs2", ppid)
         if err != nil {
             return "", err
         }
 
         if len(data) < 4 {
-            return "", fmt.Errorf("ошибка формата данных sysctl")
+            return "", fmt.Errorf("sysctl data format error")
         }
 
         // Пропускаем первые 4 байта (argc)
@@ -42,7 +45,7 @@ func getParentExePath() (string, error) {
         // Путь заканчивается первым нулевым байтом
         n := bytes.IndexByte(data, 0)
         if n == -1 {
-            return "", fmt.Errorf("путь не найден в данных")
+            return "", fmt.Errorf("path not found in data")
         }
 
         return string(data[:n]), nil
@@ -72,106 +75,116 @@ func getFileChecksum(filePath string) ([]byte, error) {
     return hash.Sum(nil), nil
 }
 
-// Шифрование
-func encrypt(path, name, text string, key []byte) (error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return err
-    }
-    
-    plainText := []byte(text)
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBEncrypter(block, bytes)
-    cipherText := make([]byte, len(plainText))
-    cfb.XORKeyStream(cipherText, plainText)
-
-    myEnv, err := godotenv.Read(path)
-    if err != nil {
-        return err
-    }
-
-    myEnv[name] = base64.StdEncoding.EncodeToString(cipherText)
-
-    if err := godotenv.Write(myEnv, path); err != nil {
-        return err 
-    }
-
-    return nil
-}
-
-// Расшифровка
-func decrypt(path, name string, key []byte) (string, error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return "", err
-    }
-
-    myEnv, err := godotenv.Read(path)
-    if err != nil {
-        return "", err
-    }
-
-    if _, ok := myEnv[name]; !ok {
-        return "", fmt.Errorf("key not found")
-    }
-
-    cipherText, err := base64.StdEncoding.DecodeString(myEnv[name])
-    if err != nil {
-        return "", err
-    }
-
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBDecrypter(block, bytes)
-    plainText := make([]byte, len(cipherText))
-    cfb.XORKeyStream(plainText, cipherText)
-
-    return string(plainText), nil
-}
-
 func main() {
-    path := flag.String("path", "/tmp/passwords", "path")
-    name := flag.String("name", "", "name")
-    pass := flag.String("password", "", "pass")
-    proc := flag.String("proc", "", "proc")
-    flag.Parse()
+    fs := pflag.NewFlagSet("mtpasswd", pflag.ContinueOnError)
 
-    if *pass != "" {
-        if *proc == "" {
+    path  := fs.String("password-file", "", "The file with encrypted passwords")
+    _      = fs.String("key", "", "The file with secret key")
+    name  := fs.String("name", "", "Password key identifier")
+    pass  := fs.String("password", "", "Password value")
+    proc  := fs.String("parent-proc", "", "Parent process path")
+    debug := fs.Bool("debug", false, "More detailed error output")
+
+	fs.Usage = func() {
+		fmt.Println("usage: mtpasswd <command> --password-file=PASSWORD-FILE [<flags>]")
+		fmt.Println("")
+        fmt.Println("A command-line tool for encrypt and decrypt passwords.")
+        fmt.Println("")
+        fmt.Println("Flags:")
+        fmt.Println("    --help     Show context-sensitive help")
+        fmt.Println("    --debug    More detailed error output")
+        fmt.Println("    --password-file=PATH")
+        fmt.Println("               The file with encrypted passwords")
+        fmt.Println("    --name=NAME")
+        fmt.Println("               Password key identifier")
+        fmt.Println("    --password=PASSWORD")
+        fmt.Println("               Password value")
+        fmt.Println("    --parent-proc=PATH")
+        fmt.Println("               Parent process path")
+        fmt.Println("")
+        fmt.Println("Commands:")
+        fmt.Println("encrypt --password-file=PASSWORD-FILE --name=NAME --password=PASSWORD [<flags>]")
+        fmt.Println("    Encrypt a password")
+        fmt.Println("")
+        fmt.Println("decrypt --password-file=PASSWORD-FILE")
+        fmt.Println("    Decrypt file with passwords and output it to stdout.")
+		os.Exit(0)
+	}
+
+    err := fs.Parse(os.Args[1:])
+    if err != nil {
+        log.Fatalf("%v", err)
+    }
+
+    args := fs.Args()
+
+    if len(args) < 1 {
+		fs.Usage()
+	}
+
+    switch args[0] {
+	case "encrypt":
+		if *proc == "" {
             procPath, err := getParentExePath()
             if err != nil {
-                log.Fatalf("[error] %v", err)
+                log.Fatalf("[error] getting parent process: %v", err)
             }
             *proc = procPath
         }
         
         checksum, err := getFileChecksum(*proc)
         if err != nil {
-            log.Fatalf("[error] %v", err)
+            log.Fatalf("[error] getting checksum: %v", err)
         }
 
-        err = encrypt(*path, *name, *pass, checksum)
+        cryptoText, err := cryptor.Encrypt(*pass, checksum)
         if err != nil {
-            log.Fatalf("[error] %v", err)
+            log.Fatalf("[error] password encryption: %v", err)
         }
 
-        return
-    } 
+        myEnv, err := godotenv.Read(*path)
+        if err != nil {
+            myEnv = make(map[string]string)
+        }
 
-    // Получаем путь до родительского процесса
-    procPath, err := getParentExePath()
-    if err != nil {
-        log.Fatalf("[error] %v", err)
-    }
+        myEnv[*name] = cryptoText
+        godotenv.Write(myEnv, *path)
 
-    checksum, err := getFileChecksum(procPath)
-    if err != nil {
-        log.Fatalf("[error] %v", err)
-    }
-
-    text, err := decrypt(*path, *name, checksum)
-    if err != nil {
-        log.Fatalf("[error] %v", err)
-    }
+	case "decrypt":
+		// Получаем путь до родительского процесса
+        procPath, err := getParentExePath()
+        if err != nil {
+            log.Fatalf("[error] getting parent process: %v", err)
+        }
     
-    fmt.Printf("%s", text)
+        checksum, err := getFileChecksum(procPath)
+        if err != nil {
+            log.Fatalf("[error] getting checksum: %v", err)
+        }
+    
+        myEnv, err := godotenv.Read(*path)
+        if err != nil {
+            log.Fatalf("[error] reading the password file: %v", err)
+        }
+
+        for key, val := range myEnv {
+            if *name != "" && *name != key {
+                continue
+            }
+
+            passwd, err := cryptor.Decrypt(val, checksum)
+            if err != nil {
+                if *debug {
+                    log.Printf("[debug] password decryption (%s): %v", key, err)
+                }
+                continue
+            }
+            
+            fmt.Printf("%s=%s\n", key, passwd)
+        }
+
+	default:
+		pflag.Usage()
+	}
+    
 }

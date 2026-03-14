@@ -21,9 +21,9 @@ upstreams:
           #- "http://127.0.0.1:8429"
         health_check: "/health"
         #error_code: 204
-        client:
-          username: 'test'
-          password: 'test'
+        #client:
+        #  username: 'test'
+        #  password: 'test'
 
   #- listen_addr: "127.0.0.1:8888"
   #  #update_stat: 10s

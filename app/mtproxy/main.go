@@ -4,34 +4,24 @@ import (
     "io"
     "io/ioutil"
     "strconv"
-    //"maps"
-    //"net"
-    //"net/rpc"
     "net/url"
     "net/http"
     "time"
     "log"
-    //"fmt"
     "os"
     "os/signal"
     "syscall"
     "flag"
     "sync"
-    //"math"
     "math/rand"
-    //"strings"
     "sort"
-    //"slices"
     "regexp"
     "bytes"
-    //"crypto/sha1"
-    "crypto/aes"
-    "crypto/cipher"
-    //"encoding/hex"
-    "encoding/base64"
     "compress/gzip"
 
     "github.com/ltkh/mtproxy/internal/config"
+    "github.com/ltkh/mtproxy/internal/cryptor"
+
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -96,6 +86,7 @@ type API struct {
     //Limits       *Limits
     Objects      *Objects
     //Client       *http.Client
+    Decrypt      bool
     Debug        bool
 }
 
@@ -113,19 +104,6 @@ type Object struct {
 type TimeValue struct {
     Timestamp    int64
     Value        float64
-}
-
-func encrypt(text, key string) (string, error) {
-    block, err := aes.NewCipher([]byte(key))
-    if err != nil {
-        return "", err
-    }
-    plainText := []byte(text)
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBEncrypter(block, bytes)
-    cipherText := make([]byte, len(plainText))
-    cfb.XORKeyStream(cipherText, plainText)
-    return base64.StdEncoding.EncodeToString(cipherText), nil
 }
 
 func getObject(r *http.Request, header string) string {
@@ -217,7 +195,7 @@ func (o *Objects) Items() []string {
     return items
 }
 
-func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
+func NewAPI(c *config.HttpClient, u *config.Upstream, decr, debug bool) (*API, error) {
     if c.Timeout == 0 {
         c.Timeout = 5 * time.Second
     }
@@ -243,7 +221,8 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
     api := &API{ 
         Upstream: u,
         Objects: &Objects{items: make(map[string]*Object)},
-        Debug: d,
+        Decrypt: decr,
+        Debug: debug,
     }
 
     go func(api *API){
@@ -255,7 +234,6 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
             for _, key := range api.Objects.Items() {
                 item := api.Objects.Update(key)
                 sizeBytesBucket.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": item.UrlPath, "object": key}).Set(item.Avg)
-                //log.Printf("[debug] %v - %v", key, int(item.Avg))
             }
             time.Sleep(api.Upstream.UpdateStat)
         }
@@ -463,14 +441,17 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                     w.WriteHeader(403)
                     return
                 }
-                encryptPass, err := encrypt(password, KeyString)
-                if err != nil {
-                    log.Printf("[error] %v - %s", err, r.URL.Path)
-                    requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "500"}).Inc()
-                    w.WriteHeader(500)
-                    return
+                if api.Decrypt {
+                    encryptPass, err := cryptor.Encrypt(password, []byte(KeyString))
+                    if err != nil {
+                        log.Printf("[error] %v - %s", err, r.URL.Path)
+                        requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "500"}).Inc()
+                        w.WriteHeader(500)
+                        return
+                    }
+                    password = encryptPass
                 }
-                if encryptPass != mPassword {
+                if password != mPassword {
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "403"}).Inc()
                     w.WriteHeader(403)
                     return
@@ -556,7 +537,7 @@ func main() {
 
     // Encrypt
     if *encryptPass != "" {
-        passwd, err := encrypt(*encryptPass, KeyString)
+        passwd, err := cryptor.Encrypt(*encryptPass, []byte(KeyString))
         if err != nil {
             log.Fatalf("[error] %v", err)
         }
@@ -565,14 +546,14 @@ func main() {
     }
 
     // Loading configuration file
-    cfg, err := config.NewConfig(*cfFile, KeyString, *decryptPass)
+    cfg, err := config.NewConfig(*cfFile, []byte(KeyString), *decryptPass)
     if err != nil {
         log.Fatalf("[error] %v", err)
     }
 
     for _, stream := range cfg.Upstreams {
         // Creating api
-        api, err := NewAPI(cfg.HttpClient, stream, *debug)
+        api, err := NewAPI(cfg.HttpClient, stream, *decryptPass, *debug)
         if err != nil {
             log.Fatalf("[error] %v", err)
         }

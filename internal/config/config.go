@@ -15,13 +15,10 @@ import (
     "io/ioutil"
     "gopkg.in/yaml.v2"
     "time"
-    "crypto/aes"
+    //"crypto/aes"
     "crypto/tls"
     "crypto/x509"
-    "crypto/cipher"
-    "encoding/base64"
-    //"net/http"
-    //"log"
+    "github.com/ltkh/mtproxy/internal/cryptor"
     //"github.com/ltkh/montools/internal/monitor"
     //"github.com/prometheus/client_golang/prometheus"
 )
@@ -113,22 +110,6 @@ type ClientSettings struct {
     tlsKeyFile             string                  `yaml:"tls_key"`
 }
 
-func decrypt(text, key string) (string, error) {
-    block, err := aes.NewCipher([]byte(key))
-    if err != nil {
-        return "", err
-    }
-    cipherText, err := base64.StdEncoding.DecodeString(text)
-    if err != nil {
-        return "", err
-    }
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBDecrypter(block, bytes)
-    plainText := make([]byte, len(cipherText))
-    cfb.XORKeyStream(plainText, cipherText)
-    return string(plainText), nil
-}
-
 // UnmarshalYAML unmarshals up from yaml.
 func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     var s string
@@ -142,7 +123,7 @@ func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     return nil
 }
 
-func NewConfig(filename, key string, encrypted bool) (*Config, error) {
+func NewConfig(filename string, key []byte, encrypted bool) (*Config, error) {
 
     cfg := &Config{}
 
@@ -161,7 +142,7 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
         }
         for i, urlMap := range stream.URLMap {
             if urlMap.ClientSettings.Password != "" && encrypted {
-                ps, err := decrypt(urlMap.ClientSettings.Password, key)
+                ps, err := cryptor.Decrypt(urlMap.ClientSettings.Password, key)
                 if err != nil {
                     return cfg, err
                 }
