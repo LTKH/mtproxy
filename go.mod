@@ -1,6 +1,6 @@
 module github.com/ltkh/mtproxy
 
-go 1.23.0
+go 1.24.0
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

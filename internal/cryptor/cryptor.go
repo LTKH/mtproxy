@@ -5,85 +5,74 @@ import (
     //"io"
     //"os"
     //"log"
-    "crypto/aes"
-    "crypto/cipher"
+    //"crypto/aes"
+    //"crypto/cipher"
     //"crypto/rand"
-    //"crypto/sha256"
-    "encoding/base64"
+    "crypto/sha256"
+    //"encoding/base64"
+    "strings"
     //"runtime"
-    "bytes"
+    //"bytes"
     //"flag"
     //"golang.org/x/sys/unix"
     //"github.com/joho/godotenv"
 )
 
-// Добавляет байты, чтобы длина была кратна blockSize (16)
-// и не меньше minLen (например, 32)
-func PKCS7Padding(data []byte, blockSize int, minLen int) []byte {
-    padding := blockSize - (len(data) % blockSize)
-    if len(data) + padding < minLen {
-        // Добиваем до минимальной длины блоками
-        needed := (minLen - len(data)) / blockSize * blockSize
-        padding += needed
+const (
+    minChar   = 34
+    maxChar   = 126
+    rangeSize = maxChar - minChar + 1
+    targetLen = 30   // Желаемая минимальная длина
+    sep       = "|"  // Разделитель пароля и "мусора"
+)
+
+func getKeyState(key string, length int) []byte {
+    result := make([]byte, length)
+    for i := 0; i < length; i++ {
+        hash := sha256.Sum256([]byte(fmt.Sprintf("%s%d", key, i)))
+        result[i] = hash[0]
     }
-    padText := bytes.Repeat([]byte{byte(padding)}, padding)
-    return append(data, padText...)
+    return result
 }
 
-// Удаляет добавленные байты при расшифровке
-func PKCS7Unpadding(data []byte) ([]byte, error) {
-    length := len(data)
-    if length == 0 {
-        return nil, fmt.Errorf("empty data")
+func Encrypt(text, key string) string {
+    // 1. Дополняем пароль до targetLen, если он короче
+    fullText := text + sep
+    if len(fullText) < targetLen {
+        extra := targetLen - len(fullText)
+        // Используем часть хеша ключа для заполнения "хвоста" (имитация шума)
+        padding := getKeyState(key+"pad", extra)
+        for _, b := range padding {
+            fullText += string(byte(int(b)%rangeSize + minChar))
+        }
     }
-    unpadding := int(data[length-1])
-    if unpadding > length {
-        return nil, fmt.Errorf("invalid padding")
+
+    // 2. Шифруем всю строку
+    keyState := getKeyState(key, len(fullText))
+    result := make([]byte, len(fullText))
+    for i := 0; i < len(fullText); i++ {
+        val := int(fullText[i]) - minChar
+        shift := int(keyState[i])
+        result[i] = byte((val+shift)%rangeSize + minChar)
     }
-    return data[:(length - unpadding)], nil
+    return string(result)
 }
 
-// Шифрование
-func Encrypt(text string, key []byte) (string, error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return "", err
+func Decrypt(cipherText, key string) string {
+    keyState := getKeyState(key, len(cipherText))
+    decoded := make([]byte, len(cipherText))
+
+    for i := 0; i < len(cipherText); i++ {
+        val := int(cipherText[i]) - minChar
+        shift := int(keyState[i])
+        newVal := (val - (shift % rangeSize) + rangeSize) % rangeSize
+        decoded[i] = byte(newVal + minChar)
     }
 
-    // Дополняем текст минимум до 32 байт (даст 43-44 символа в base64)
-    plainText := PKCS7Padding([]byte(text), aes.BlockSize, 32)
-    //plainText := []byte(text)
-
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBEncrypter(block, bytes)
-    cipherText := make([]byte, len(plainText))
-    cfb.XORKeyStream(cipherText, plainText)
-
-    return base64.StdEncoding.EncodeToString(cipherText), nil
-}
-
-// Расшифровка
-func Decrypt(text string, key []byte) (string, error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return "", err
+    // 3. Пытаемся найти разделитель
+    resStr := string(decoded)
+    if idx := strings.LastIndex(resStr, sep); idx != -1 {
+        return resStr[:idx]
     }
-
-    cipherText, err := base64.StdEncoding.DecodeString(text)
-    if err != nil {
-        return "", err
-    }
-
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBDecrypter(block, bytes)
-    plainText := make([]byte, len(cipherText))
-    cfb.XORKeyStream(plainText, cipherText)
-
-    // Убираем дополнение, чтобы получить чистый пароль
-    finalText, err := PKCS7Unpadding(plainText)
-    if err != nil { 
-        return "", err 
-    }
-
-    return string(finalText), nil
+    return resStr // Если ключ неверный, разделитель не найдется, вернем всё
 }

@@ -83,11 +83,11 @@ func main() {
     name  := fs.String("name", "", "Password key identifier")
     pass  := fs.String("password", "", "Password value")
     proc  := fs.String("parent-proc", "", "Parent process path")
-    debug := fs.Bool("debug", false, "More detailed error output")
+    //debug := fs.Bool("debug", false, "More detailed error output")
 
-	fs.Usage = func() {
-		fmt.Println("usage: mtpasswd <command> --password-file=PASSWORD-FILE [<flags>]")
-		fmt.Println("")
+    fs.Usage = func() {
+        fmt.Println("usage: mtpasswd <command> --password-file=PASSWORD-FILE [<flags>]")
+        fmt.Println("")
         fmt.Println("A command-line tool for encrypt and decrypt passwords.")
         fmt.Println("")
         fmt.Println("Flags:")
@@ -108,8 +108,8 @@ func main() {
         fmt.Println("")
         fmt.Println("decrypt --password-file=PASSWORD-FILE")
         fmt.Println("    Decrypt file with passwords and output it to stdout.")
-		os.Exit(0)
-	}
+        os.Exit(0)
+    }
 
     err := fs.Parse(os.Args[1:])
     if err != nil {
@@ -119,12 +119,12 @@ func main() {
     args := fs.Args()
 
     if len(args) < 1 {
-		fs.Usage()
-	}
+        fs.Usage()
+    }
 
     switch args[0] {
-	case "encrypt":
-		if *proc == "" {
+    case "encrypt":
+        if *proc == "" {
             procPath, err := getParentExePath()
             if err != nil {
                 log.Fatalf("[error] getting parent process: %v", err)
@@ -135,23 +135,19 @@ func main() {
         checksum, err := getFileChecksum(*proc)
         if err != nil {
             log.Fatalf("[error] getting checksum: %v", err)
-        }
-
-        cryptoText, err := cryptor.Encrypt(*pass, checksum)
-        if err != nil {
-            log.Fatalf("[error] password encryption: %v", err)
-        }
+        } 
 
         myEnv, err := godotenv.Read(*path)
         if err != nil {
             myEnv = make(map[string]string)
         }
 
+        cryptoText := cryptor.Encrypt(*pass, string(checksum))
         myEnv[*name] = cryptoText
         godotenv.Write(myEnv, *path)
 
-	case "decrypt":
-		// Получаем путь до родительского процесса
+    case "decrypt":
+        // Получаем путь до родительского процесса
         procPath, err := getParentExePath()
         if err != nil {
             log.Fatalf("[error] getting parent process: %v", err)
@@ -172,19 +168,12 @@ func main() {
                 continue
             }
 
-            passwd, err := cryptor.Decrypt(val, checksum)
-            if err != nil {
-                if *debug {
-                    log.Printf("[debug] password decryption (%s): %v", key, err)
-                }
-                continue
-            }
-            
-            fmt.Printf("%s=%s\n", key, passwd)
+            passwd := cryptor.Decrypt(val, string(checksum))
+            fmt.Printf("%s=%q\n", key, passwd)
         }
 
-	default:
-		pflag.Usage()
-	}
+    default:
+        pflag.Usage()
+    }
     
 }

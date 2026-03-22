@@ -123,7 +123,7 @@ func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     return nil
 }
 
-func NewConfig(filename string, key []byte, encrypted bool) (*Config, error) {
+func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
     cfg := &Config{}
 
@@ -142,11 +142,7 @@ func NewConfig(filename string, key []byte, encrypted bool) (*Config, error) {
         }
         for i, urlMap := range stream.URLMap {
             if urlMap.ClientSettings.Password != "" && encrypted {
-                ps, err := cryptor.Decrypt(urlMap.ClientSettings.Password, key)
-                if err != nil {
-                    return cfg, err
-                }
-                urlMap.ClientSettings.Password = ps
+                urlMap.ClientSettings.Password = cryptor.Decrypt(urlMap.ClientSettings.Password, key)
             }
 
             for _, srcPaths := range urlMap.SrcPaths {

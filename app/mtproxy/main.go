@@ -442,14 +442,7 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                     return
                 }
                 if api.Decrypt {
-                    encryptPass, err := cryptor.Encrypt(password, []byte(KeyString))
-                    if err != nil {
-                        log.Printf("[error] %v - %s", err, r.URL.Path)
-                        requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "500"}).Inc()
-                        w.WriteHeader(500)
-                        return
-                    }
-                    password = encryptPass
+                    password = cryptor.Encrypt(password, KeyString)
                 }
                 if password != mPassword {
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "403"}).Inc()
@@ -537,16 +530,12 @@ func main() {
 
     // Encrypt
     if *encryptPass != "" {
-        passwd, err := cryptor.Encrypt(*encryptPass, []byte(KeyString))
-        if err != nil {
-            log.Fatalf("[error] %v", err)
-        }
-        log.Printf("[pass] %s", passwd)
+        log.Printf("[pass] %s", cryptor.Encrypt(*encryptPass, KeyString))
         return
     }
 
     // Loading configuration file
-    cfg, err := config.NewConfig(*cfFile, []byte(KeyString), *decryptPass)
+    cfg, err := config.NewConfig(*cfFile, KeyString, *decryptPass)
     if err != nil {
         log.Fatalf("[error] %v", err)
     }
