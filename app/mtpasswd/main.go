@@ -9,11 +9,12 @@ import (
     //"crypto/cipher"
     //"crypto/rand"
     "crypto/sha256"
+    "encoding/hex"
     //"encoding/base64"
     "runtime"
-    "bytes"
+    //"bytes"
     //"flag"
-    "golang.org/x/sys/unix"
+    //"golang.org/x/sys/unix"
     "github.com/joho/godotenv"
     "github.com/spf13/pflag"
     //"github.com/99designs/keyring"
@@ -27,28 +28,6 @@ func getParentExePath() (string, error) {
     case "linux":
         // На Linux читаем симлинк из /proc
         return os.Readlink(fmt.Sprintf("/proc/%d/exe", ppid))
-
-    case "darwin": // macOS
-        // Возвращает путь к исполняемому файлу и аргументы
-        data, err := unix.SysctlRaw("kern.procargs2", ppid)
-        if err != nil {
-            return "", err
-        }
-
-        if len(data) < 4 {
-            return "", fmt.Errorf("sysctl data format error")
-        }
-
-        // Пропускаем первые 4 байта (argc)
-        data = data[4:]
-
-        // Путь заканчивается первым нулевым байтом
-        n := bytes.IndexByte(data, 0)
-        if n == -1 {
-            return "", fmt.Errorf("path not found in data")
-        }
-
-        return string(data[:n]), nil
 
     default:
         return "", fmt.Errorf("the operating system is not supported")
@@ -76,13 +55,13 @@ func getFileChecksum(filePath string) ([]byte, error) {
 }
 
 func main() {
-    fs := pflag.NewFlagSet("mtpasswd", pflag.ContinueOnError)
-
-    path  := fs.String("password-file", "", "The file with encrypted passwords")
-    _      = fs.String("key", "", "The file with secret key")
-    name  := fs.String("name", "", "Password key identifier")
-    pass  := fs.String("password", "", "Password value")
-    proc  := fs.String("parent-proc", "", "Parent process path")
+    fs     := pflag.NewFlagSet("mtpasswd", pflag.ContinueOnError)
+    path   := fs.String("password-file", "", "The file with encrypted passwords")
+    shaSum := fs.String("sha256sum", "", "The SHA-256 hash for the specified file")
+    _       = fs.String("key", "", "The file with secret key")
+    name   := fs.String("name", "", "Password key identifier")
+    pass   := fs.String("password", "", "Password value")
+    proc   := fs.String("parent-proc", "", "Parent process path")
     //debug := fs.Bool("debug", false, "More detailed error output")
 
     fs.Usage = func() {
@@ -136,26 +115,30 @@ func main() {
         if err != nil {
             log.Fatalf("[error] getting checksum: %v", err)
         } 
+        log.Printf("%s", hex.EncodeToString(checksum))
 
         myEnv, err := godotenv.Read(*path)
         if err != nil {
             myEnv = make(map[string]string)
         }
 
-        cryptoText := cryptor.Encrypt(*pass, string(checksum))
+        cryptoText := cryptor.Encrypt(*pass, hex.EncodeToString(checksum))
         myEnv[*name] = cryptoText
         godotenv.Write(myEnv, *path)
 
     case "decrypt":
-        // Получаем путь до родительского процесса
-        procPath, err := getParentExePath()
-        if err != nil {
-            log.Fatalf("[error] getting parent process: %v", err)
-        }
-    
-        checksum, err := getFileChecksum(procPath)
-        if err != nil {
-            log.Fatalf("[error] getting checksum: %v", err)
+        if *shaSum == "" {
+            // Получаем путь до родительского процесса
+            procPath, err := getParentExePath()
+            if err != nil {
+                log.Fatalf("[error] getting parent process: %v", err)
+            }
+        
+            checksum, err := getFileChecksum(procPath)
+            if err != nil {
+                log.Fatalf("[error] getting checksum: %v", err)
+            }
+            *shaSum = hex.EncodeToString(checksum)
         }
     
         myEnv, err := godotenv.Read(*path)
@@ -163,13 +146,13 @@ func main() {
             log.Fatalf("[error] reading the password file: %v", err)
         }
 
-        for key, val := range myEnv {
-            if *name != "" && *name != key {
+        for k, val := range myEnv {
+            if *name != "" && *name != k {
                 continue
             }
 
-            passwd := cryptor.Decrypt(val, string(checksum))
-            fmt.Printf("%s=%q\n", key, passwd)
+            passwd := cryptor.Decrypt(val, *shaSum)
+            fmt.Printf("%s=%q\n", k, passwd)
         }
 
     default:

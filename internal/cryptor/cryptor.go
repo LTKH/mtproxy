@@ -1,78 +1,79 @@
 package cryptor
 
 import (
-    "fmt"
-    //"io"
-    //"os"
-    //"log"
-    //"crypto/aes"
-    //"crypto/cipher"
-    //"crypto/rand"
-    "crypto/sha256"
-    //"encoding/base64"
-    "strings"
-    //"runtime"
-    //"bytes"
-    //"flag"
-    //"golang.org/x/sys/unix"
-    //"github.com/joho/godotenv"
+	"crypto/sha256"
+	"encoding/hex" // Добавили для работы с HEX-строкой
+	"fmt"
+	"strings"
 )
 
 const (
-    minChar   = 34
-    maxChar   = 126
-    rangeSize = maxChar - minChar + 1
-    targetLen = 30   // Желаемая минимальная длина
-    sep       = "|"  // Разделитель пароля и "мусора"
+	minChar   = 34
+	maxChar   = 126
+	rangeSize = maxChar - minChar + 1
+	targetLen = 30
+	sep       = "|"
 )
 
-func getKeyState(key string, length int) []byte {
-    result := make([]byte, length)
-    for i := 0; i < length; i++ {
-        hash := sha256.Sum256([]byte(fmt.Sprintf("%s%d", key, i)))
-        result[i] = hash[0]
-    }
-    return result
+// Изменили логику: теперь принимаем байты ключа, а не строку
+func getKeyState(keyBytes []byte, length int) []byte {
+	result := make([]byte, length)
+	for i := 0; i < length; i++ {
+		// Создаем уникальную соль для каждой итерации на основе байтов ключа
+		data := append(keyBytes, []byte(fmt.Sprintf("%d", i))...)
+		hash := sha256.Sum256(data)
+		result[i] = hash[0]
+	}
+	return result
 }
 
-func Encrypt(text, key string) string {
-    // 1. Дополняем пароль до targetLen, если он короче
-    fullText := text + sep
-    if len(fullText) < targetLen {
-        extra := targetLen - len(fullText)
-        // Используем часть хеша ключа для заполнения "хвоста" (имитация шума)
-        padding := getKeyState(key+"pad", extra)
-        for _, b := range padding {
-            fullText += string(byte(int(b)%rangeSize + minChar))
-        }
-    }
+func Encrypt(text, keyHex string) string {
+	// Декодируем HEX-строку ключа в байты
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		// Если ключ не HEX, используем его как обычную строку для совместимости
+		keyBytes = []byte(keyHex)
+	}
 
-    // 2. Шифруем всю строку
-    keyState := getKeyState(key, len(fullText))
-    result := make([]byte, len(fullText))
-    for i := 0; i < len(fullText); i++ {
-        val := int(fullText[i]) - minChar
-        shift := int(keyState[i])
-        result[i] = byte((val+shift)%rangeSize + minChar)
-    }
-    return string(result)
+	fullText := text + sep
+	if len(fullText) < targetLen {
+		extra := targetLen - len(fullText)
+		// Передаем байты ключа
+		padding := getKeyState(append(keyBytes, []byte("pad")...), extra)
+		for _, b := range padding {
+			fullText += string(byte(int(b)%rangeSize + minChar))
+		}
+	}
+
+	keyState := getKeyState(keyBytes, len(fullText))
+	result := make([]byte, len(fullText))
+	for i := 0; i < len(fullText); i++ {
+		val := int(fullText[i]) - minChar
+		shift := int(keyState[i])
+		result[i] = byte((val+shift)%rangeSize + minChar)
+	}
+	return string(result)
 }
 
-func Decrypt(cipherText, key string) string {
-    keyState := getKeyState(key, len(cipherText))
-    decoded := make([]byte, len(cipherText))
+func Decrypt(cipherText, keyHex string) string {
+	keyBytes, err := hex.DecodeString(keyHex)
+	if err != nil {
+		keyBytes = []byte(keyHex)
+	}
 
-    for i := 0; i < len(cipherText); i++ {
-        val := int(cipherText[i]) - minChar
-        shift := int(keyState[i])
-        newVal := (val - (shift % rangeSize) + rangeSize) % rangeSize
-        decoded[i] = byte(newVal + minChar)
-    }
+	keyState := getKeyState(keyBytes, len(cipherText))
+	decoded := make([]byte, len(cipherText))
 
-    // 3. Пытаемся найти разделитель
-    resStr := string(decoded)
-    if idx := strings.LastIndex(resStr, sep); idx != -1 {
-        return resStr[:idx]
-    }
-    return resStr // Если ключ неверный, разделитель не найдется, вернем всё
+	for i := 0; i < len(cipherText); i++ {
+		val := int(cipherText[i]) - minChar
+		shift := int(keyState[i])
+		newVal := (val - (shift % rangeSize) + rangeSize) % rangeSize
+		decoded[i] = byte(newVal + minChar)
+	}
+
+	resStr := string(decoded)
+	if idx := strings.LastIndex(resStr, sep); idx != -1 {
+		return resStr[:idx]
+	}
+	return resStr
 }
