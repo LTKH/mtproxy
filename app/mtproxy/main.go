@@ -4,19 +4,32 @@ import (
     "io"
     "io/ioutil"
     "strconv"
+    "cmp"
+    //"maps"
+    //"net"
+    //"net/rpc"
     "net/url"
     "net/http"
     "time"
     "log"
+    //"fmt"
     "os"
     "os/signal"
     "syscall"
     "flag"
     "sync"
-    "math/rand"
-    "sort"
+    //"math"
+    //"math/rand"
+    //"strings"
+    //"sort"
+    "slices"
     "regexp"
     "bytes"
+    //"crypto/sha1"
+    "crypto/aes"
+    "crypto/cipher"
+    //"encoding/hex"
+    "encoding/base64"
     "compress/gzip"
 
     "github.com/ltkh/mtproxy/internal/config"
@@ -77,7 +90,7 @@ var (
         []string{"target_url"},
     )
     ipRegexp, _ = regexp.Compile("^(.*):[0-9]+$")
-    KeyString = "jtrses0-cxaw86djak34:sa8"
+    KeyString = "513a523aa07799858871663413d08fc5973be4fd0748fa26680bc6"
 )
 
 type API struct {
@@ -86,7 +99,6 @@ type API struct {
     //Limits       *Limits
     Objects      *Objects
     //Client       *http.Client
-    Decrypt      bool
     Debug        bool
 }
 
@@ -104,6 +116,19 @@ type Object struct {
 type TimeValue struct {
     Timestamp    int64
     Value        float64
+}
+
+func encrypt(text, key string) (string, error) {
+    block, err := aes.NewCipher([]byte(key))
+    if err != nil {
+        return "", err
+    }
+    plainText := []byte(text)
+    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
+    cfb := cipher.NewCFBEncrypter(block, bytes)
+    cipherText := make([]byte, len(plainText))
+    cfb.XORKeyStream(cipherText, plainText)
+    return base64.StdEncoding.EncodeToString(cipherText), nil
 }
 
 func getObject(r *http.Request, header string) string {
@@ -195,7 +220,7 @@ func (o *Objects) Items() []string {
     return items
 }
 
-func NewAPI(c *config.HttpClient, u *config.Upstream, decr, debug bool) (*API, error) {
+func NewAPI(c *config.HttpClient, u *config.Upstream, d bool) (*API, error) {
     if c.Timeout == 0 {
         c.Timeout = 5 * time.Second
     }
@@ -221,8 +246,7 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, decr, debug bool) (*API, e
     api := &API{ 
         Upstream: u,
         Objects: &Objects{items: make(map[string]*Object)},
-        Decrypt: decr,
-        Debug: debug,
+        Debug: d,
     }
 
     go func(api *API){
@@ -234,6 +258,7 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, decr, debug bool) (*API, e
             for _, key := range api.Objects.Items() {
                 item := api.Objects.Update(key)
                 sizeBytesBucket.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "url_path": item.UrlPath, "object": key}).Set(item.Avg)
+                //log.Printf("[debug] %v - %v", key, int(item.Avg))
             }
             time.Sleep(api.Upstream.UpdateStat)
         }
@@ -242,27 +267,27 @@ func NewAPI(c *config.HttpClient, u *config.Upstream, decr, debug bool) (*API, e
     return api, nil
 }
 
-func getPrefixURLs(prefixes []*config.URLPrefix) []*config.URLPrefix {
-    var results []*config.URLPrefix
+func getSortedBackends(backends []*config.Backend) []*config.Backend {
+    var results []*config.Backend
 
-    if len(prefixes) == 0 {
+    if len(backends) == 0 {
         return results
     }
 
-    for _, p := range prefixes {
-        if len(p.Health) == 0 {
+    for _, p := range backends {
+        if len(p.Health) < 5 {
             results = append(results, p)
         }
     }
 
-    sort.Slice(results, func(i, j int) bool {
-        // 1. Если задержки не равны — сортируем по задержке
-        if results[i].Latency.Milliseconds() != results[j].Latency.Milliseconds() {
-            return results[i].Latency.Milliseconds() < results[j].Latency.Milliseconds()
-        }
-        
-        // 2. Если задержки равны — подбрасываем монетку (50/50)
-        return rand.Intn(2) == 0
+    // Сортируем по задержке ответа
+    slices.SortFunc(results, func(a, b *config.Backend) int { 
+        return cmp.Compare(a.Latency.Milliseconds(), b.Latency.Milliseconds())
+    })
+
+    // Сортируем по количеству обрабатываемых запросов
+    slices.SortFunc(results, func(a, b *config.Backend) int { 
+        return cmp.Compare(a.MaxRequests, b.MaxRequests)
     })
 
     return results
@@ -332,9 +357,9 @@ func (api *API) NewRequest(r *http.Request, url string, userInfo config.UserInfo
     return body, resp.Header, resp.StatusCode, duration, nil
 }
 
-func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPrefix *config.URLPrefix, username string, data []byte) ([]byte, map[string][]string, int, error) {
-    if len(urlPrefix.Requests) < 1000000 {
-        urlPrefix.Requests <- 1
+func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, backend *config.Backend, username string, data []byte) ([]byte, map[string][]string, int, error) {
+    if len(backend.Requests) < 1000000 {
+        backend.Requests <- 1
     }
 
     userInfo := config.UserInfo{
@@ -344,10 +369,10 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
 
     client := api.Upstream.URLMap[mapPath.Index].Client
 
-    body, header, code, _, err := api.NewRequest(r, urlPrefix.URL+r.URL.Path, userInfo, client, bytes.NewReader(data))
+    body, header, code, _, err := api.NewRequest(r, backend.URL+r.URL.Path, userInfo, client, bytes.NewReader(data))
     if err != nil {
-        if len(urlPrefix.Requests) > 0 {
-            <- urlPrefix.Requests
+        if len(backend.Requests) > 0 {
+            <- backend.Requests
         }
 
         requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": strconv.Itoa(code)}).Inc()
@@ -358,8 +383,8 @@ func (api *API) NewProxyRequest(r *http.Request, mapPath config.SrcPath, urlPref
         return nil, nil, code, err
     }
 
-    if len(urlPrefix.Requests) > 0 {
-        <- urlPrefix.Requests
+    if len(backend.Requests) > 0 {
+        <- backend.Requests
     }
 
     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": strconv.Itoa(code)}).Inc()
@@ -374,8 +399,8 @@ func (api *API) HealthCheck(w http.ResponseWriter, r *http.Request){
     w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
     for _, urlMap := range api.Upstream.URLMap {
-        for _, urlPrefix := range urlMap.URLPrefix {
-            if len(urlPrefix.Health) == 0 {
+        for _, backend := range urlMap.Backends {
+            if len(backend.Health) < 5 {
                 w.WriteHeader(200)
                 w.Write([]byte("OK"))
                 return
@@ -441,24 +466,22 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                     w.WriteHeader(403)
                     return
                 }
-                if api.Decrypt {
-                    password = cryptor.Encrypt(password, KeyString)
-                }
-                if password != mPassword {
+                encryptPass := cryptor.Encrypt(password, KeyString)
+                if encryptPass != mPassword {
                     requestTotal.With(prometheus.Labels{"listen_addr": api.Upstream.ListenAddr, "user": username, "code": "403"}).Inc()
                     w.WriteHeader(403)
                     return
                 }
             }
 
-            prefixURLs := getPrefixURLs(api.Upstream.URLMap[mapPath.Index].URLPrefix)
-            for i, urlPrefix := range prefixURLs {
+            backends := getSortedBackends(api.Upstream.URLMap[mapPath.Index].Backends)
+            for i, backend := range backends {
 
-                //log.Printf("[debug] requests - %v, latency - %v, URL - %v", len(urlPrefix.Requests), urlPrefix.Latency.Milliseconds(), urlPrefix.URL)
+                //log.Printf("[debug] requests - %v, latency - %v, URL - %v", len(backend.Requests), backend.Latency.Milliseconds(), backend.URL)
 
-                if api.Upstream.URLMap[mapPath.Index].RequestsLimit > 0 && len(urlPrefix.Requests) > api.Upstream.URLMap[mapPath.Index].RequestsLimit {
+                if backend.MaxRequests > 0 && len(backend.Requests) > backend.MaxRequests {
                     // Пропустить, если есть еще элементы массива
-                    if i+1 < len(prefixURLs) {
+                    if i+1 < len(backends) {
                         continue
                     }
 
@@ -474,17 +497,17 @@ func (api *API) ReverseProxy(w http.ResponseWriter, r *http.Request) {
                 }
 
                 if api.Upstream.URLMap[mapPath.Index].IgnoreAnswer {
-                    go api.NewProxyRequest(r, mapPath, urlPrefix, username, data)
+                    go api.NewProxyRequest(r, mapPath, backend, username, data)
                     w.WriteHeader(204)
                     return
                 }
 
-                body, header, code, err := api.NewProxyRequest(r, mapPath, urlPrefix, username, data)
+                body, header, code, err := api.NewProxyRequest(r, mapPath, backend, username, data)
                 if err != nil {
                     log.Printf("[error] %v - %s", err, r.URL.Path)
                     
                     // Пропустить, если есть еще элементы массива
-                    if i+1 < len(prefixURLs) {
+                    if i+1 < len(backends) {
                         continue
                     }
 
@@ -530,7 +553,8 @@ func main() {
 
     // Encrypt
     if *encryptPass != "" {
-        log.Printf("[pass] %s", cryptor.Encrypt(*encryptPass, KeyString))
+        passwd := cryptor.Encrypt(*encryptPass, KeyString)
+        log.Printf("[pass] %s", passwd)
         return
     }
 
@@ -542,7 +566,7 @@ func main() {
 
     for _, stream := range cfg.Upstreams {
         // Creating api
-        api, err := NewAPI(cfg.HttpClient, stream, *decryptPass, *debug)
+        api, err := NewAPI(cfg.HttpClient, stream, *debug)
         if err != nil {
             log.Fatalf("[error] %v", err)
         }
@@ -552,9 +576,9 @@ func main() {
         mux.HandleFunc("/", api.ReverseProxy)
 
         for _, urlMap := range stream.URLMap {
-            for _, urlPrefix := range urlMap.URLPrefix {
+            for _, backend := range urlMap.Backends {
                 if urlMap.HealthCheck != "" {
-                    go func(urlPrefix *config.URLPrefix){
+                    go func(backend *config.Backend){
                         for{
                             r := &http.Request{
                                 Method: "GET",
@@ -564,24 +588,24 @@ func main() {
                                 Username: urlMap.ClientSettings.Username,
                                 Password: urlMap.ClientSettings.Password,
                             }
-                            _, _, code, latency, err := api.NewRequest(r, urlPrefix.URL+urlMap.HealthCheck, userInfo, urlMap.Client, nil)
+                            _, _, code, latency, err := api.NewRequest(r, backend.URL+urlMap.HealthCheck, userInfo, urlMap.Client, nil)
                             if err != nil || code >= 300 {
-                                if len(urlPrefix.Health) < 5 {
-                                    urlPrefix.Health <- 1
+                                if len(backend.Health) < 5 {
+                                    backend.Health <- 1
                                 }
-                                log.Printf("[warn] \"GET %v\" %v (%v)", urlPrefix.URL+urlMap.HealthCheck, code, latency)
+                                log.Printf("[warn] \"GET %v\" %v (%v)", backend.URL+urlMap.HealthCheck, code, latency)
                             } else {
-                                if len(urlPrefix.Health) > 0 {
-                                    <- urlPrefix.Health
+                                if len(backend.Health) > 0 {
+                                    <- backend.Health
                                 }
                             }
-                            urlPrefix.Latency = latency
-                            healthCheckFailed.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Health)))
-                            healthCheckLatency.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(urlPrefix.Latency.Milliseconds()))
-                            upstreamRequests.With(prometheus.Labels{"target_url": urlPrefix.URL}).Set(float64(len(urlPrefix.Requests)))
+                            backend.Latency = latency
+                            healthCheckFailed.With(prometheus.Labels{"target_url": backend.URL}).Set(float64(len(backend.Health)))
+                            healthCheckLatency.With(prometheus.Labels{"target_url": backend.URL}).Set(float64(backend.Latency.Milliseconds()))
+                            upstreamRequests.With(prometheus.Labels{"target_url": backend.URL}).Set(float64(len(backend.Requests)))
                             time.Sleep(1 * time.Second)
                         }
-                    }(urlPrefix)
+                    }(backend)
                 }
             }
         }

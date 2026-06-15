@@ -15,10 +15,13 @@ import (
     "io/ioutil"
     "gopkg.in/yaml.v2"
     "time"
-    //"crypto/aes"
+    "crypto/aes"
     "crypto/tls"
     "crypto/x509"
-    "github.com/ltkh/mtproxy/internal/cryptor"
+    "crypto/cipher"
+    "encoding/base64"
+    //"net/http"
+    //"log"
     //"github.com/ltkh/montools/internal/monitor"
     //"github.com/prometheus/client_golang/prometheus"
 )
@@ -62,7 +65,8 @@ type Upstream struct {
 // URLMap is a mapping from source paths to target urls.
 type URLMap struct {
     SrcPaths               []string                `yaml:"src_paths"`
-    URLPrefix              []*URLPrefix            `yaml:"url_prefix"`
+    URLPrefix              []string                `yaml:"url_prefix"`
+    Backends               []*Backend              `yaml:"backends"`
     Users                  []*UserInfo             `yaml:"users"`
     MapUsers               map[string]string       `yaml:"-"`
     HealthCheck            string                  `yaml:"health_check"`
@@ -73,12 +77,17 @@ type URLMap struct {
     ClientSettings         ClientSettings          `yaml:"client"`
 }
 
-// URLPrefix represents passed `url_prefix`
-type URLPrefix struct {
+type Backend struct {
     Requests               chan int
     Health                 chan int
-    Latency                time.Duration
-    URL                    string
+    Latency                time.Duration 
+    URL                    string                  `yaml:"url"`
+    MaxRequests            int                     `yaml:"max_requests"`
+}
+
+// URLPrefix represents passed `url_prefix`
+type URLPrefix struct {
+    URL                    string                  `yaml:"url"`
 }
 
 // SrcPath represents an src path
@@ -110,6 +119,23 @@ type ClientSettings struct {
     tlsKeyFile             string                  `yaml:"tls_key"`
 }
 
+func decrypt(text, key string) (string, error) {
+    block, err := aes.NewCipher([]byte(key))
+    if err != nil {
+        return "", err
+    }
+    cipherText, err := base64.StdEncoding.DecodeString(text)
+    if err != nil {
+        return "", err
+    }
+    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
+    cfb := cipher.NewCFBDecrypter(block, bytes)
+    plainText := make([]byte, len(cipherText))
+    cfb.XORKeyStream(plainText, cipherText)
+    return string(plainText), nil
+}
+
+/*
 // UnmarshalYAML unmarshals up from yaml.
 func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     var s string
@@ -122,6 +148,7 @@ func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
     up.Health = make(chan int, 5)
     return nil
 }
+*/
 
 func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
@@ -142,7 +169,11 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
         }
         for i, urlMap := range stream.URLMap {
             if urlMap.ClientSettings.Password != "" && encrypted {
-                urlMap.ClientSettings.Password = cryptor.Decrypt(urlMap.ClientSettings.Password, key)
+                ps, err := decrypt(urlMap.ClientSettings.Password, key)
+                if err != nil {
+                    return cfg, err
+                }
+                urlMap.ClientSettings.Password = ps
             }
 
             for _, srcPaths := range urlMap.SrcPaths {
@@ -157,6 +188,20 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
                 mp.RE = re
 
                 stream.MapPaths = append(stream.MapPaths, mp)
+            }
+
+            // Для обратной совместимости конфигупации
+            for _, urlPrefix := range urlMap.URLPrefix {
+                stream.URLMap[i].Backends = append(stream.URLMap[i].Backends, &Backend{
+                    URL: urlPrefix,
+                    MaxRequests: urlMap.RequestsLimit,
+                })
+            }
+
+            // Обогащение объектов для будущих весов
+            for b, _ := range urlMap.Backends {
+                urlMap.Backends[b].Requests = make(chan int, 1000000)
+                urlMap.Backends[b].Health = make(chan int, 5)
             }
 
             mu := make(map[string]string)

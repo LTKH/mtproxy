@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	minChar   = 34
+	minChar   = 40
 	maxChar   = 126
 	rangeSize = maxChar - minChar + 1
 	targetLen = 30
