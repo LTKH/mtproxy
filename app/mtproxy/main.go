@@ -25,11 +25,7 @@ import (
     "slices"
     "regexp"
     "bytes"
-    //"crypto/sha1"
-    "crypto/aes"
-    "crypto/cipher"
     //"encoding/hex"
-    "encoding/base64"
     "compress/gzip"
 
     "github.com/ltkh/mtproxy/internal/config"
@@ -116,19 +112,6 @@ type Object struct {
 type TimeValue struct {
     Timestamp    int64
     Value        float64
-}
-
-func encrypt(text, key string) (string, error) {
-    block, err := aes.NewCipher([]byte(key))
-    if err != nil {
-        return "", err
-    }
-    plainText := []byte(text)
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBEncrypter(block, bytes)
-    cipherText := make([]byte, len(plainText))
-    cfb.XORKeyStream(cipherText, plainText)
-    return base64.StdEncoding.EncodeToString(cipherText), nil
 }
 
 func getObject(r *http.Request, header string) string {
