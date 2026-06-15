@@ -20,10 +20,13 @@ upstreams:
           - "http://127.0.0.1:8428"
           #- "http://127.0.0.1:8429"
         health_check: "/health"
+        #users:
+        #  - username: 'test'
+        #    password: 't@smX]<\_>mezCP.@[}n+Z=S/H,~y@'
         #error_code: 204
-        #client:
-        #  username: 'test'
-        #  password: 'test'
+        client:
+          username: 'test'
+          password: 't@smX]<\_>mezCP.@[}n+Z=S/H,~y@'
 
   #- listen_addr: "127.0.0.1:8888"
   #  #update_stat: 10s

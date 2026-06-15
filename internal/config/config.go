@@ -13,15 +13,12 @@ import (
     //"net/url"
     "net/http"
     "io/ioutil"
+    "crypto/tls"
     "gopkg.in/yaml.v2"
     "time"
-    "crypto/aes"
-    "crypto/tls"
     "crypto/x509"
-    "crypto/cipher"
-    "encoding/base64"
-    //"net/http"
-    //"log"
+
+    "github.com/ltkh/mtproxy/internal/cryptor"
     //"github.com/ltkh/montools/internal/monitor"
     //"github.com/prometheus/client_golang/prometheus"
 )
@@ -119,37 +116,6 @@ type ClientSettings struct {
     tlsKeyFile             string                  `yaml:"tls_key"`
 }
 
-func decrypt(text, key string) (string, error) {
-    block, err := aes.NewCipher([]byte(key))
-    if err != nil {
-        return "", err
-    }
-    cipherText, err := base64.StdEncoding.DecodeString(text)
-    if err != nil {
-        return "", err
-    }
-    bytes := []byte{35, 46, 57, 24, 85, 35, 24, 74, 87, 35, 88, 98, 66, 32, 14, 05}
-    cfb := cipher.NewCFBDecrypter(block, bytes)
-    plainText := make([]byte, len(cipherText))
-    cfb.XORKeyStream(plainText, cipherText)
-    return string(plainText), nil
-}
-
-/*
-// UnmarshalYAML unmarshals up from yaml.
-func (up *URLPrefix) UnmarshalYAML(f func(interface{}) error) error {
-    var s string
-    if err := f(&s); err != nil {
-        return err
-    }
-    //up.Check = true
-    up.URL = s
-    up.Requests = make(chan int, 1000000)
-    up.Health = make(chan int, 5)
-    return nil
-}
-*/
-
 func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
     cfg := &Config{}
@@ -168,13 +134,7 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
             stream.ObjectHeader = "X-Custom-Object"
         }
         for i, urlMap := range stream.URLMap {
-            if urlMap.ClientSettings.Password != "" && encrypted {
-                ps, err := decrypt(urlMap.ClientSettings.Password, key)
-                if err != nil {
-                    return cfg, err
-                }
-                urlMap.ClientSettings.Password = ps
-            }
+            
 
             for _, srcPaths := range urlMap.SrcPaths {
                 var mp SrcPath
@@ -206,9 +166,18 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
             mu := make(map[string]string)
             for _, user := range urlMap.Users {
+                // Шифруем пароль пользователя
+                if user.Password != "" && !encrypted {
+                    user.Password = cryptor.Encrypt(user.Password, key)
+                }
                 mu[user.Username] = user.Password
             }
             urlMap.MapUsers = mu
+
+            // Расшифровываем пароль для клиентского соединения
+            if urlMap.ClientSettings.Password != "" && encrypted {
+                urlMap.ClientSettings.Password = cryptor.Decrypt(urlMap.ClientSettings.Password, key)
+            }
 
             tlsConfig := &tls.Config{InsecureSkipVerify: true}
 
