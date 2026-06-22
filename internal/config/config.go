@@ -176,7 +176,7 @@ func NewConfig(filename, key string, encrypted bool) (*Config, error) {
 
             // Расшифровываем пароль для клиентского соединения
             if urlMap.ClientSettings.Password != "" && encrypted {
-                urlMap.ClientSettings.Password = cryptor.Decript(urlMap.ClientSettings.Password, key)
+                urlMap.ClientSettings.Password = cryptor.Decrypt(urlMap.ClientSettings.Password, key)
             }
 
             tlsConfig := &tls.Config{InsecureSkipVerify: true}
